@@ -1,7 +1,20 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleContexts, MagicHash #-}
-module Codec.Picture.RGBA8 where
+module Codec.Picture.RGBA8 (
+   -- * Conversions
+   ToPixelRGBA8(..),
+   fromDynamicImage,
+   readImageRGBA8,
+   fromColorAndOpacity,
+   -- * Image transformations
+   trimImage,
+   patchImage,
+   flipVertically,
+   -- * Low level functions
+   addrImage,
+   ) where
 
 import Codec.Picture
+import Codec.Picture.Types
 import qualified Data.Vector.Storable as V
 import qualified Data.Vector.Storable.Mutable as MV
 import Foreign.Marshal.Utils
@@ -10,24 +23,57 @@ import Foreign.ForeignPtr
 import Foreign.Ptr
 import System.IO.Unsafe
 import Data.Bits
+import Data.Word
 import GHC.Ptr
 import GHC.Base
 import GHC.Num
 
 class ToPixelRGBA8 a where
     toRGBA8 :: a -> PixelRGBA8
-    
-instance ToPixelRGBA8 Pixel8 where
-    toRGBA8 b = PixelRGBA8 b b b 255
 
-instance ToPixelRGBA8 PixelYA8 where
-    toRGBA8 (PixelYA8 l a) = PixelRGBA8 l l l a
+instance ToPixelRGBA8 Pixel8 where toRGBA8 = promotePixel
+instance ToPixelRGBA8 PixelYA8 where toRGBA8 = promotePixel
+instance ToPixelRGBA8 PixelRGB8 where toRGBA8 = promotePixel
+instance ToPixelRGBA8 PixelRGBA8 where toRGBA8 = id
 
-instance ToPixelRGBA8 PixelRGB8 where
-    toRGBA8 (PixelRGB8 r g b) = PixelRGBA8 r g b 255
+instance ToPixelRGBA8 Pixel16 where toRGBA8 = downsamplePixel . promotePixel
+instance ToPixelRGBA8 PixelYA16 where toRGBA8 = downsamplePixel . promotePixel
+instance ToPixelRGBA8 PixelRGB16 where toRGBA8 = downsamplePixel . promotePixel
+instance ToPixelRGBA8 PixelRGBA16 where toRGBA8 = downsamplePixel
 
-instance ToPixelRGBA8 PixelRGBA8 where
-    toRGBA8 = id
+instance ToPixelRGBA8 PixelYCbCr8 where toRGBA8 = promotePixel . convertPixel'
+instance ToPixelRGBA8 PixelCMYK8 where toRGBA8 = promotePixel . convertPixel'
+instance ToPixelRGBA8 PixelCMYK16 where
+  toRGBA8 = downsamplePixel . promotePixel . convertPixel''
+
+downsamplePixel :: PixelRGBA16 -> PixelRGBA8
+downsamplePixel (PixelRGBA16 r' g' b' a') = PixelRGBA8 r g b a
+  where r = componentTo8 r'
+        g = componentTo8 g'
+        b = componentTo8 b'
+        a = componentTo8 a'
+
+componentToLDR :: Float -> Word8
+componentToLDR = truncate . (255 *) . min 1.0 . max 0.0
+
+componentTo8 :: Word16 -> Word8
+componentTo8 = fromIntegral . (`div` 256)
+
+convertPixel' :: ColorSpaceConvertible a PixelRGB8 => a -> PixelRGB8
+convertPixel' = convertPixel
+
+convertPixel'' :: ColorSpaceConvertible a PixelRGB16 => a -> PixelRGB16
+convertPixel'' = convertPixel
+
+instance ToPixelRGBA8 PixelF where
+    toRGBA8 f = PixelRGBA8 c c c 255
+      where c = componentToLDR f
+
+instance ToPixelRGBA8 PixelRGBF where
+    toRGBA8 (PixelRGBF rf gf bf) = PixelRGBA8 r g b 255
+      where r = componentToLDR rf
+            g = componentToLDR gf
+            b = componentToLDR bf
 
 fromColorAndOpacity :: PixelRGB8 -> Image Pixel8 -> Image PixelRGBA8
 fromColorAndOpacity (PixelRGB8 r g b) (Image w h vec) = Image w h $ V.generate (w * h * 4) pix where
@@ -47,7 +93,7 @@ trimImage :: Image PixelRGBA8
     -> Image PixelRGBA8
 trimImage (Image w _ vec) (w', h') (x0, y0) = unsafePerformIO $ V.unsafeWith vec $ \ptr -> do
     mv <- MV.unsafeNew $ w' * h' * 4
-    MV.unsafeWith mv $ \dst -> forM_ [0..h'-1] $ \y -> 
+    MV.unsafeWith mv $ \dst -> forM_ [0..h'-1] $ \y ->
         copyBytes (plusPtr dst $ y * w' * 4) (plusPtr ptr $ (*4) $ (y + y0) * w + x0) (4 * w')
     Image w' h' `fmap` V.unsafeFreeze mv
 
@@ -66,11 +112,19 @@ flipVertically (Image w h v) = unsafePerformIO $ V.unsafeWith v $ \ptr -> do
     Image w h `fmap` V.unsafeFreeze mv
 
 fromDynamicImage :: DynamicImage -> Image PixelRGBA8
-fromDynamicImage (ImageY8 img) = pixelMap toRGBA8 img
-fromDynamicImage (ImageYA8 img) = pixelMap toRGBA8 img
-fromDynamicImage (ImageRGB8 img) = pixelMap toRGBA8 img
-fromDynamicImage (ImageRGBA8 img) = img
-fromDynamicImage _ = error "Unsupported format"
+fromDynamicImage (ImageRGBA8 img)   = img
+fromDynamicImage (ImageY8 img)      = pixelMap toRGBA8 img
+fromDynamicImage (ImageYA8 img)     = pixelMap toRGBA8 img
+fromDynamicImage (ImageRGB8 img)    = pixelMap toRGBA8 img
+fromDynamicImage (ImageY16 img)     = pixelMap toRGBA8 img
+fromDynamicImage (ImageYF img)      = pixelMap toRGBA8 img
+fromDynamicImage (ImageYA16 img)    = pixelMap toRGBA8 img
+fromDynamicImage (ImageRGB16 img)   = pixelMap toRGBA8 img
+fromDynamicImage (ImageRGBF img)    = pixelMap toRGBA8 img
+fromDynamicImage (ImageRGBA16 img)  = pixelMap toRGBA8 img
+fromDynamicImage (ImageYCbCr8 img)  = pixelMap toRGBA8 img
+fromDynamicImage (ImageCMYK8 img)   = pixelMap toRGBA8 img
+fromDynamicImage (ImageCMYK16 img)  = pixelMap toRGBA8 img
 
 readImageRGBA8 :: FilePath -> IO (Image PixelRGBA8)
 readImageRGBA8 path = readImage path >>= either fail (return . fromDynamicImage)
